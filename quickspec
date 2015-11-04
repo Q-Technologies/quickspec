@@ -1,0 +1,356 @@
+#!/usr/bin/env perl
+
+################################################################################
+#                                                                              #
+# quickspec - Quickly generate an RPM specfile for Web applications            #
+#                                                                              #
+#          see https://github.com/Q-Technologies/quickspec for full details    #
+#                                                                              #
+#                                                                              #
+# Copyright 2015 - Q-Technologies (http://www.Q-Technologies.com.au)           #
+#                                                                              #
+# Limitations                                                                  #
+#   - Apart from config file and generic READMEs, it does not facilitate       #
+#   installing files into different top level directories - e.g. man pages     #
+#                                                                              #
+#                                                                              #
+################################################################################
+
+use strict;
+use File::Find;
+use YAML qw(LoadFile);
+use Data::Dumper;
+use File::Basename;
+use 5.10.0;
+
+# Globals
+my $match_notexe = qr/.*\.(pm|yml|yaml|readme|md|tt|js|png|gif|html|3pm|\d)$/;
+my $match_config_file = qr/.*\.(yml|yaml)$/;
+chomp(my $date = `date "+%a %b %d %Y"` );
+
+
+# Process command line arguments
+my $config_file = shift;
+die "Please specify the config file to use first!" if ! $config_file;
+my @build_hosts = @ARGV;
+#die "Please specify at least one build host!" if ! @build_hosts;
+
+
+# Read the config file
+my $config = LoadFile( $config_file );
+my $specfile = $config->{Name}.".spec";
+my $archive = $config->{Name}."-".$config->{Version}."-".$config->{Release}.".tar.bz2";
+my $spec;
+open $spec, ">", $config->{PkgDir}."/".$specfile or die "Error: Could not open specfile for writing: ".$!;
+
+# Set reasonable defaults for file attributes
+my $conf_mode = $config->{ConfMode};
+$conf_mode = "644" if ! $config->{ConfMode};
+my $user = $config->{RunAs}{username};
+$user = "root" if ! $config->{RunAs}{username};
+my $group = $user;
+
+
+# Find the files and directories to be included in the RPM
+my @directories = ( $config->{SrcDir} );
+usage_err( "The 'SrcDir' configuration item cannot be resolved to a directory!" ) if ! -d $config->{SrcDir};
+my $include = qr/$config->{IncFiles}/;
+my $conf_include = qr/$config->{ConfIncFiles}/;
+$conf_include = qr/XXXXXXXX/ if ! $config->{ConfIncFiles};
+my $doc_include = qr/$config->{DocIncFiles}/;
+$doc_include = qr/XXXXXXXX/ if ! $config->{DocIncFiles};
+my $exclude = qr/$config->{ExcFiles}/;
+$exclude = qr/XXXXXXXX/ if ! $config->{ExcFiles};
+my $exclude_dir = qr/$config->{ExcDirs}/;
+$exclude_dir = qr/XXXXXXXX/ if ! $config->{ExcDirs};
+my @included_files;
+my %included_dirs;
+my @inc_config_files;
+my %inc_config_dirs;
+my @inc_doc_files;
+my %inc_doc_dirs;
+find(\&wanted, @directories);
+#say Dumper( $include );
+#say Dumper( $conf_include );
+#say Dumper( $exclude );
+#say Dumper( $exclude_dir );
+#say Dumper( \@included_files );
+#say Dumper( \%included_dirs );
+#exit;
+
+
+# Start writing the SPEC file
+my @keys = qw( Name Version Release License Summary Url Group BuildArch BuildRoot );
+
+print $spec <<SPEC;
+#
+# spec file for package $config->{Name}
+#
+SPEC
+for my $key ( @keys ){
+    usage_err( "The '$key' configuration item is required!" ) if ! $config->{$key};
+    printf $spec "%-16s%s\n", $key.":", $config->{$key};
+}
+for my $key ( qw( Description ) ){
+    usage_err( "The '$key' configuration item is required!" ) if ! $config->{$key};
+}
+say $spec "Provides: ".$config->{Requires} if $config->{Requires};
+say $spec "AutoReqProv: no" if $config->{NoAutoDep};
+print $spec <<SPEC;
+Source: $archive
+
+%description
+$config->{Description}
+%prep
+rm -rf *
+
+%setup -c 
+
+%build
+
+SPEC
+if( $config->{RunAs} ){
+    print $spec <<SPEC;
+%pre
+id $config->{RunAs}{username} >/dev/null 2>&1
+if [[ \$? -eq 1 ]]; then
+    useradd -r -d $config->{RunAs}{home} $config->{RunAs}{username}
+fi
+
+SPEC
+}
+
+# Create the directory structure for the install
+print $spec <<SPEC;
+%install
+rm -rf \$RPM_BUILD_ROOT/*
+SPEC
+
+if( $config->{RCFile} ){
+    print $spec <<SPEC;
+mkdir -p \$RPM_BUILD_ROOT/var/log/$config->{Name}
+mkdir -p \$RPM_BUILD_ROOT/etc/init.d
+mkdir -p \$RPM_BUILD_ROOT/etc/sysconfig
+SPEC
+}
+say $spec "mkdir -p \$RPM_BUILD_ROOT/etc/cron.d" if $config->{CronFile};
+say $spec "mkdir -p \$RPM_BUILD_ROOT/usr/share/doc/$config->{Name}/";
+say $spec "mkdir -p \$RPM_BUILD_ROOT/$config->{InstallRoot}";
+say $spec "mkdir -p \$RPM_BUILD_ROOT/$config->{ConfDir}" if $config->{ConfDir};
+for my $dir ( keys %included_dirs ){
+    say $spec "mkdir -p \$RPM_BUILD_ROOT/$config->{InstallRoot}/$dir";
+}
+for my $dir ( keys %inc_config_dirs ){
+    say $spec "mkdir -p \$RPM_BUILD_ROOT/$config->{ConfDir}/$dir";
+}
+for my $dir ( keys %inc_doc_dirs ){
+    say $spec "mkdir -p \$RPM_BUILD_ROOT/usr/share/doc/$config->{Name}/$dir";
+}
+
+# Copy all the files into the directory structure
+for my $file ( @included_files ){
+    my $mode = "755";
+    $mode = "644" if $file =~ /$match_notexe/i;
+    if( fgrep( qr|/usr/bin/bash|, $config->{SrcDir}."/".$file) ){
+        say $spec "sed -e 's|/usr/bin/bash|/bin/bash|' $file > \$RPM_BUILD_ROOT/$config->{InstallRoot}/$file";
+    } else {
+        say $spec "install -m $mode $file \$RPM_BUILD_ROOT/$config->{InstallRoot}/$file";
+    }
+}
+for my $file ( @inc_config_files ){
+    my $mode = "644";
+    say $spec "install -m $mode $file \$RPM_BUILD_ROOT/$config->{ConfDir}/$file";
+}
+for my $file ( @inc_doc_files ){
+    my $mode = "644";
+    say $spec "install -m $mode $file \$RPM_BUILD_ROOT/usr/share/doc/$config->{Name}/$file";
+}
+say $spec "install -m 644 \$RPM_SOURCE_DIR/$config->{Name}.rcfile \$RPM_BUILD_ROOT/etc/init.d/$config->{Name}" if $config->{RCFile};
+say $spec "install -m 644 \$RPM_SOURCE_DIR/$config->{Name}.sysconfig \$RPM_BUILD_ROOT/etc/sysconfig/$config->{Name}" if $config->{RCFile};
+say $spec "install -m 644 \$RPM_SOURCE_DIR/$config->{Name}.cron \$RPM_BUILD_ROOT/etc/cron.d/$config->{Name}" if $config->{CronFile};
+
+
+# Create the RPM - specifiy the attributes of the included files
+print $spec <<SPEC;
+
+%files
+SPEC
+#if( $config->{RunAs} ){
+    #say "%defattr(644,$config->{RunAs}{username},$config->{RunAs}{username},755)";
+#} else {
+    say $spec "%defattr(644,$user,$group,755)";
+#}
+say $spec "    $config->{InstallRoot}";
+for my $dir ( keys %included_dirs ){
+    say $spec "    $config->{InstallRoot}/$dir";
+}
+for my $file ( @included_files ){
+    say $spec "%attr(755,$user,$group) $config->{InstallRoot}/$file" if( $file !~ /$match_notexe/i );
+}
+say $spec "%attr(755,$user,$group) /var/log/$config->{Name}" if( $config->{LogDir} );
+
+say $spec "%attr(755,$user,$group) $config->{ConfDir}" if( $config->{ConfDir} );
+for my $file ( @inc_config_files ){
+    # Mark the config files which are outside the root
+    say $spec "%attr($conf_mode,$user,$group) $config->{ConfDir}/$file";
+    say $spec "%config $config->{ConfDir}/$file";
+}
+for my $file ( @included_files ){
+    # Mark those still left in the root
+    if( $file =~ /$match_config_file/ ){
+        say $spec "%attr($conf_mode,$user,$group) $config->{InstallRoot}/$file";
+        say $spec "%config $config->{InstallRoot}/$file";
+    }
+}
+if( $config->{RCFile} ){
+    print $spec <<SPEC;
+%attr(755,$user,$group) /etc/init.d/$config->{Name}
+%attr(644,$user,$group) /etc/sysconfig/$config->{Name}
+%config /etc/sysconfig/$config->{Name}
+SPEC
+}
+if( $config->{CronFile} ){
+    print $spec <<SPEC;
+%attr(644,$user,$group) /etc/cron.d/$config->{Name}
+%config /etc/cron.d/$config->{Name}
+SPEC
+}
+print $spec <<SPEC;
+%docdir /usr/share/doc/$config->{Name}/
+/usr/share/doc/$config->{Name}/
+
+%post
+SPEC
+if( $config->{RCFile} ){
+    print $spec <<SPEC;
+if [[ \$1 = 1 ]]; then
+    # Install
+    chkconfig $config->{Name} on
+    service $config->{Name} start
+#elif [[ \$1 = 2 ]]; then
+    # Upgrade
+fi
+SPEC
+}
+print $spec <<SPEC;
+ 
+%clean
+rm -rf \$RPM_BUILD_ROOT
+rm -rf %{_tmppath}/%{name}
+rm -rf %{_topdir}/BUILD/%{name}
+
+%preun
+SPEC
+if( $config->{RCFile} ){
+    print $spec <<SPEC;
+if [[ \$1 = 0 ]]; then
+    # Uninstall
+    chkconfig $config->{Name} off
+    service $config->{Name} stop
+elif [[ \$1 = 1 ]]; then
+    # Upgrade
+    service $config->{Name} restart
+fi
+SPEC
+}
+print $spec <<SPEC;
+
+%changelog
+* $date $config->{Author}
+$config->{ChangeLog}
+SPEC
+
+
+# Build the RPM on the specified servers
+print `mkdir -p $config->{PkgDir}/RPMs 2>&1`;
+for my $host( @build_hosts ){
+    my $remote_root="rpmbuild";
+    my $remote_dirs = $remote_root."/SOURCES/" . join( " ".$remote_root."/SOURCES/", keys %included_dirs );
+    say "Building RPM on $host";
+    say "\tCopying files...";
+	print `ssh -q $host mkdir -p $remote_root/SPECS 2>&1`;
+    #my $tar_files = join( " ", @included_files, @inc_config_files, @inc_doc_files );
+    my $tar_files;
+    open $tar_files, ">/tmp/$archive.list" or die $!;
+    for ( @included_files, @inc_config_files, @inc_doc_files ){
+        say $tar_files $_;
+    }
+    close $tar_files;
+    #say $tar_files;
+    print `cd $config->{SrcDir} && tar cvjf /tmp/$archive -T /tmp/$archive.list`;
+    print `scp -q /tmp/$archive $host:$remote_root/SOURCES/ 2>&1`;
+    print `scp -q $config->{PkgDir}/$config->{Name}.rcfile $host:$remote_root/SOURCES/ 2>&1` if $config->{RCFile};
+    print `scp -q $config->{PkgDir}/$config->{Name}.sysconfig $host:$remote_root/SOURCES/ 2>&1` if $config->{RCFile};
+    print `scp -q $config->{PkgDir}/$config->{Name}.cron $host:$remote_root/SOURCES/ 2>&1` if $config->{CronFile};
+    print `scp -q $config->{PkgDir}/$specfile $host:$remote_root/SPECS/ 2>&1`;
+    say "\tBuilding RPM...";
+    open PIPE, "ssh -q $host rpmbuild -ba $remote_root/SPECS/$specfile 2>&1 |" or die "Error: couldn't start pipe: $!";
+    while(<PIPE>){
+        print $_;
+    }
+    close PIPE;
+    say "\tCopying RPM back to localhost...";
+    print `scp -q $host:$remote_root/SRPMS/$config->{Name}-$config->{Version}-$config->{Release}.src.rpm $config->{PkgDir}/RPMs 2>&1`;
+    print `scp -q $host:$remote_root/RPMS/$config->{BuildArch}/$config->{Name}-$config->{Version}-$config->{Release}.$config->{BuildArch}.rpm $config->{PkgDir}/RPMs 2>&1`;
+	say "Done";
+	say;
+}
+
+
+sub wanted {
+
+    $File::Find::dir =~ /$File::Find::topdir\/(.*)/;
+    my $rel_dir = $1;
+    $File::Find::name =~ /$File::Find::topdir\/(.*)/;
+    my $rel_file = $1;
+
+    if( /$include/ && ! /$exclude/ && $rel_dir !~ /$exclude_dir/ && ! -d ){
+        # Build a list of included files
+        push @included_files, $rel_file;
+        # Build a list of included directories
+        $included_dirs{$rel_dir} = 1;
+    }
+ 
+    if( /$conf_include/ && $rel_dir !~ /$exclude_dir/ && ! -d ){
+        # Build a list of included configuration files installed elsewhwere
+        push @inc_config_files, $rel_file;
+        # Build a list of included configuration directories installed elsewhwere
+        $inc_config_dirs{$rel_dir} = 1;
+    }
+
+
+    if( /$doc_include/ && $rel_dir !~ /$exclude_dir/ && ! -d ){
+        # Build a list of included documentation files installed elsewhwere
+        push @inc_doc_files, $rel_file;
+        # Build a list of included documentation directories installed elsewhwere
+        $inc_doc_dirs{$rel_dir} = 1;
+    }
+
+}
+
+sub usage_err {
+    my $msg = shift;
+    say $msg;
+    exit 1;
+}
+
+sub fgrep {
+    my $match = shift;
+    #say $match;
+    my $file = shift;
+    #say `pwd && echo $file`;
+    my $found = 1;
+    my @file;
+    open INFILE, "<$file" or ($found = 0);
+    if( $found ){
+        while( <INFILE> ){
+            if( $_ =~ $match ){
+            #if( m|/usr/bin/bash| ){
+                #print $_;
+                push @file, $_;
+            }
+        }
+        close INFILE;
+    }
+    return join("", @file);
+}
