@@ -264,11 +264,20 @@ SPEC
 # Build the RPM on the specified servers
 print `mkdir -p $config->{PkgDir}/RPMs 2>&1`;
 for my $host( @build_hosts ){
+    my $ssh = "ssh -q $host";
+    my $scp1 = "scp -q";
+    my $scp2 = "$host:";
     my $remote_root="rpmbuild";
+    if( $host eq "localhost" ){
+        $ssh = "";
+        $scp1 = "cp";
+        $scp2 = "";
+        $remote_root=$ENV{HOME}."/".$remote_root;
+    }
     my $remote_dirs = $remote_root."/SOURCES/" . join( " ".$remote_root."/SOURCES/", keys %included_dirs );
     say "Building RPM on $host";
     say "\tCopying files...";
-	print `ssh -q $host mkdir -p $remote_root/SPECS 2>&1`;
+	print `$ssh mkdir -p $remote_root/SPECS 2>&1`;
     #my $tar_files = join( " ", @included_files, @inc_config_files, @inc_doc_files );
     my $tar_files;
     open $tar_files, ">/tmp/$archive.list" or die $!;
@@ -277,21 +286,24 @@ for my $host( @build_hosts ){
     }
     close $tar_files;
     #say $tar_files;
-    print `cd $config->{SrcDir} && tar cvjf /tmp/$archive -T /tmp/$archive.list`;
-    print `scp -q /tmp/$archive $host:$remote_root/SOURCES/ 2>&1`;
-    print `scp -q $config->{PkgDir}/$config->{Name}.rcfile $host:$remote_root/SOURCES/ 2>&1` if $config->{RCFile};
-    print `scp -q $config->{PkgDir}/$config->{Name}.sysconfig $host:$remote_root/SOURCES/ 2>&1` if $config->{RCFile};
-    print `scp -q $config->{PkgDir}/$config->{Name}.cron $host:$remote_root/SOURCES/ 2>&1` if $config->{CronFile};
-    print `scp -q $config->{PkgDir}/$specfile $host:$remote_root/SPECS/ 2>&1`;
+    print `cd $config->{SrcDir} && tar cjf /tmp/$archive -T /tmp/$archive.list`;
+    print `$scp1 /tmp/$archive $scp2$remote_root/SOURCES/ 2>&1`;
+    print `$scp1 $config->{PkgDir}/$config->{Name}.rcfile $scp2$remote_root/SOURCES/ 2>&1` if $config->{RCFile};
+    print `$scp1 $config->{PkgDir}/$config->{Name}.sysconfig $scp2$remote_root/SOURCES/ 2>&1` if $config->{RCFile};
+    print `$scp1 $config->{PkgDir}/$config->{Name}.cron $scp2$remote_root/SOURCES/ 2>&1` if $config->{CronFile};
+    print `$scp1 $config->{PkgDir}/$specfile $scp2$remote_root/SPECS/ 2>&1`;
     say "\tBuilding RPM...";
-    open PIPE, "ssh -q $host rpmbuild -ba $remote_root/SPECS/$specfile 2>&1 |" or die "Error: couldn't start pipe: $!";
+    open PIPE, "$ssh rpmbuild -ba $remote_root/SPECS/$specfile 2>&1 | tail -20 |" or die "Error: couldn't start pipe: $!";
+    say "\t\tLast 20 lines of output...";
+    my @output;
     while(<PIPE>){
+        push @output, $_;
         print $_;
     }
     close PIPE;
     say "\tCopying RPM back to localhost...";
-    print `scp -q $host:$remote_root/SRPMS/$config->{Name}-$config->{Version}-$config->{Release}.src.rpm $config->{PkgDir}/RPMs 2>&1`;
-    print `scp -q $host:$remote_root/RPMS/$config->{BuildArch}/$config->{Name}-$config->{Version}-$config->{Release}.$config->{BuildArch}.rpm $config->{PkgDir}/RPMs 2>&1`;
+    print `$scp1 $scp2$remote_root/SRPMS/$config->{Name}-$config->{Version}-$config->{Release}.src.rpm $config->{PkgDir}/RPMs 2>&1`;
+    print `$scp1 $scp2$remote_root/RPMS/$config->{BuildArch}/$config->{Name}-$config->{Version}-$config->{Release}.$config->{BuildArch}.rpm $config->{PkgDir}/RPMs 2>&1`;
 	say "Done";
 	say;
 }
