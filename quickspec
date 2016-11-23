@@ -41,7 +41,12 @@ my $config = LoadFile( $config_file );
 my $specfile = $config->{Name}.".spec";
 my $archive = $config->{Name}."-".$config->{Version}."-".$config->{Release}.".tar.bz2";
 my $spec;
+my $log;
+if( ! -d $config->{PkgDir} ){
+        mkdir $config->{PkgDir} or die "Error: Could not create the package directory: ".$!;
+}
 open $spec, ">", $config->{PkgDir}."/".$specfile or die "Error: Could not open specfile for writing: ".$!;
+open $log, ">", $config->{PkgDir}."/quickspec.log" or die "Error: Could not open logfile for writing: ".$!;
 
 # Set reasonable defaults for file attributes
 my $conf_mode = $config->{ConfMode};
@@ -94,8 +99,19 @@ for my $key ( @keys ){
 for my $key ( qw( Description ) ){
     usage_err( "The '$key' configuration item is required!" ) if ! $config->{$key};
 }
-say $spec "Provides: ".$config->{Requires} if $config->{Requires};
-say $spec "AutoReqProv: no" if $config->{NoAutoDep};
+say $spec "AutoReqProv: no" if $config->{NoAutoReqProv};
+say $spec "AutoProv: no" if $config->{NoAutoProv};
+say $spec "AutoReq: no" if $config->{NoAutoReq};
+if( $config->{Requires} ){
+    for my $item ( @{ $config->{Requires} } ){
+        say $spec "Requires: ".$item;
+    }
+}
+if( $config->{Provides} ){
+    for my $item ( @{ $config->{Provides} } ){
+        say $spec "Provides: ".$item;
+    }
+}
 print $spec <<SPEC;
 Source: $archive
 
@@ -206,13 +222,13 @@ if( $config->{RCFile} ){
     print $spec <<SPEC;
 %attr(755,$user,$group) /etc/init.d/$config->{Name}
 %attr(644,$user,$group) /etc/sysconfig/$config->{Name}
-%config /etc/sysconfig/$config->{Name}
+%config(noreplace) /etc/sysconfig/$config->{Name}
 SPEC
 }
 if( $config->{CronFile} ){
     print $spec <<SPEC;
 %attr(644,$user,$group) /etc/cron.d/$config->{Name}
-%config /etc/cron.d/$config->{Name}
+%config(noreplace) /etc/cron.d/$config->{Name}
 SPEC
 }
 print $spec <<SPEC;
@@ -285,22 +301,28 @@ for my $host( @build_hosts ){
         say $tar_files $_;
     }
     close $tar_files;
-    #say $tar_files;
-    print `cd $config->{SrcDir} && tar cjf /tmp/$archive -T /tmp/$archive.list`;
+    #say Dumper($tar_files);
+    print `cd $config->{SrcDir} && tar cjf /tmp/$archive -T /tmp/$archive.list 2>&1`;
+    print `$ssh mkdir -p $remote_root/SOURCES/ 2>&1`;
     print `$scp1 /tmp/$archive $scp2$remote_root/SOURCES/ 2>&1`;
     print `$scp1 $config->{PkgDir}/$config->{Name}.rcfile $scp2$remote_root/SOURCES/ 2>&1` if $config->{RCFile};
     print `$scp1 $config->{PkgDir}/$config->{Name}.sysconfig $scp2$remote_root/SOURCES/ 2>&1` if $config->{RCFile};
     print `$scp1 $config->{PkgDir}/$config->{Name}.cron $scp2$remote_root/SOURCES/ 2>&1` if $config->{CronFile};
     print `$scp1 $config->{PkgDir}/$specfile $scp2$remote_root/SPECS/ 2>&1`;
     say "\tBuilding RPM...";
-    open PIPE, "$ssh rpmbuild -ba $remote_root/SPECS/$specfile 2>&1 | tail -20 |" or die "Error: couldn't start pipe: $!";
-    say "\t\tLast 20 lines of output...";
+    open PIPE, "$ssh rpmbuild -ba $remote_root/SPECS/$specfile 2>&1 |" or die "Error: couldn't start pipe: $!";
     my @output;
     while(<PIPE>){
         push @output, $_;
-        print $_;
     }
     close PIPE;
+    say "\t\tLast 20 lines of output:";
+    #say Dumper( \@output);
+    my $i = 0;
+    for ( @output ) { 
+        print $_ if $i > @output - 20;
+         $i++;
+    }
     say "\tCopying RPM back to localhost...";
     print `$scp1 $scp2$remote_root/SRPMS/$config->{Name}-$config->{Version}-$config->{Release}.src.rpm $config->{PkgDir}/RPMs 2>&1`;
     print `$scp1 $scp2$remote_root/RPMS/$config->{BuildArch}/$config->{Name}-$config->{Version}-$config->{Release}.$config->{BuildArch}.rpm $config->{PkgDir}/RPMs 2>&1`;
